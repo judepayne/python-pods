@@ -1,0 +1,13 @@
+[project]
+name = "pods"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bencode-py>=4.0.0",
+    "edn-format>=0.7.5",
+    "pytest>=8.4.0",
+    "requests>=2.32.3",
+    "transit-python2>=0.8.321",
+]
