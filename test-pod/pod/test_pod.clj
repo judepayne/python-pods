@@ -16,6 +16,28 @@
     (binding [*out* (io/writer "./log.txt" :append true)]
       (apply println (cons (str "pod> " (java.util.Date.) ": ") args)))))
 
+
+;; ***** CUSTOM EDN READERS *****
+
+(defn read-person-tag [person-data]
+  "Custom reader for #person tag"
+  (let [{:keys [name age]} person-data]
+    {:type "Person"
+     :name name
+     :age age
+     :description (str name " is " age " years old")}))
+
+(defn read-date-tag [date-string]
+  "Custom reader for #date tag"
+  {:type "Date"
+   :value date-string
+   :parsed (java.time.LocalDate/parse date-string)})
+
+(def custom-edn-readers
+  {'person read-person-tag
+   'date read-date-tag})
+
+
 ;; ***** TEST FUNCTIONS *****
 
 (defn deep-merge
@@ -34,7 +56,27 @@
                 m1 m2)
     :else m2))
 
+(defn echo
+  "Echoes back the input data unchanged"
+  [data]
+  (debug "metadata: " (meta data))
+  data)
 
+
+(defn async-countdown
+  "Async function that counts down 3, 2, 1 with 1 second delays"
+  [opts]
+  (let [success-fn (:success opts)
+        done-fn (:done opts)]
+    (future
+      (Thread/sleep 1000)
+      (success-fn "3")
+      (Thread/sleep 1000) 
+      (success-fn "2")
+      (Thread/sleep 1000)
+      (success-fn "1")
+      (done-fn))
+    {:status "started"}))
 
 ;; **************************
 
@@ -56,6 +98,7 @@
        (format "(def x%s (inc x%s))" i (dec i))
        "(def x0 0)")}))
 
+;; Update the transit-json-read function to include UUID support
 (defn transit-json-read [^String s]
   (with-open [bais (java.io.ByteArrayInputStream. (.getBytes s "UTF-8"))]
     (let [r (transit/reader bais :json {:handlers
@@ -66,15 +109,24 @@
                                          "java.array"
                                          (transit/read-handler
                                           (fn [v]
-                                            (into-array v)))}})]
+                                            (into-array v)))
+                                         "u"  ; UUID handler
+                                         (transit/read-handler
+                                          (fn [uuid-str]
+                                            (java.util.UUID/fromString uuid-str)))}})]
       (transit/read r))))
 
+;; Update the transit-json-write function to include UUID support
 (defn transit-json-write [s]
   (with-open [baos (java.io.ByteArrayOutputStream. 4096)]
     (let [w (transit/writer baos :json {:handlers
                                         {java.time.LocalDateTime
                                          (transit/write-handler
                                           "local-date-time"
+                                          str)
+                                         java.util.UUID
+                                         (transit/write-handler
+                                          "u"
                                           str)}
                                         :default-handler
                                         (transit/write-handler
@@ -99,7 +151,7 @@
                    :json cheshire/generate-string
                    :transit+json transit-json-write)
         read-fn (case format
-                  :edn edn/read-string
+                  :edn #(edn/read-string {:readers custom-edn-readers} %)
                   :json #(cheshire/parse-string % true)
                   :transit+json transit-json-read)
         socket (= "socket" (System/getenv "BABASHKA_POD_TRANSPORT"))
@@ -133,14 +185,25 @@
                                            :edn "edn"
                                            :json "json"
                                            :transit+json "transit+json")
-                                "readers" {"my/tag" "identity"
-                                           ;; NOTE: this function is defined later,
-                                           ;; which should be supported
-                                           "my/other-tag" "pod.test-pod/read-other-tag"}
+                                "readers" (case format
+                                            :edn {:python
+                                                  {"person" "def read_person(data):\n    return {\n        'type': 'Person',\n        'name': data['name'],\n        'age': data['age'],\n        'description': f\"{data['name']} is {data['age']} years old\"\n    }"
+                                                   "date" "def read_date(date_str):\n    from datetime import datetime\n    return {\n        'type': 'Date',\n        'value': date_str,\n        'parsed': datetime.fromisoformat(date_str)\n    }"}}
+                                            {}) ; No readers for JSON/Transit
                                 "namespaces"
                                 [{"name" "pod.test-pod"
-                                  "vars" [{"name" "add-one"}
-                                          {"name" "deep-merge"}]}]
+                                  "vars" [{"name" "add-one"
+                                           "meta" "{:doc \"adds one to its integer arg\"}"}
+                                          {"name" "deep-merge"}
+                                          {"name" "echo"
+                                           "meta" "{:doc \"echoes back the input data unchanged\"}"}
+                                          {"name" "async-countdown" "async" "true"}
+                                          {"name" "echo-meta"
+                                           "arg-meta" "true"
+                                           "meta" "{:doc \"echoes back data with metadata preserved\"}"}
+                                          {"name" "return-python-code"
+                                           "meta" "{:doc \"returns Python code to be executed client-side\"}"}
+                                          {"name" "define-add2"}]}]
                                 "ops" {"shutdown" {}}})
                     (recur))
                 :invoke (let [var (-> (get message "var")
@@ -151,7 +214,6 @@
                               args (get message "args")
                               args (read-string args)
                               args (read-fn args)]
-                          (debug "var: " var " args: " args)
                           (case var
                             pod.test-pod/add-one
                             (try (let [ret (inc (first args))]
@@ -176,7 +238,99 @@
                                           {"ex-data" (write-fn {:args args})
                                            "ex-message" (.getMessage e)
                                            "status" ["done" "error"]
-                                           "id" id}))))
+                                           "id" id})))
+                            pod.test-pod/echo
+                            (try (let [ret (echo (first args))]
+                                   (write out
+                                          {"value" (write-fn ret)
+                                           "id" id
+                                           "status" ["done"]}))
+                                 (catch Exception e
+                                   (write out
+                                          {"ex-data" (write-fn {:args args})
+                                           "ex-message" (.getMessage e)
+                                           "status" ["done" "error"]
+                                           "id" id})))
+                            pod.test-pod/async-countdown
+                            (try 
+                              (let [success-fn (fn [value]
+                                                 (write out
+                                                        {"value" (write-fn value)
+                                                         "id" id
+                                                         "status" []}))
+                                    done-fn (fn []
+                                              (write out
+                                                     {"id" id
+                                                      "status" ["done"]}))
+                                    opts {:success success-fn :done done-fn}
+                                    ret (async-countdown opts)]
+                                (write out
+                                       {"value" (write-fn ret)
+                                        "id" id
+                                        "status" []}))
+                              (catch Exception e
+                                (write out
+                                       {"ex-data" (write-fn {:args args})
+                                        "ex-message" (.getMessage e)
+                                        "status" ["done" "error"]
+                                        "id" id})))
+                            pod.test-pod/echo-meta
+                            (try
+                              (write out
+                                     {"id" id
+                                      "status" ["done"]
+                                      "value"
+                                      (case format
+                                        :transit+json (transit-json-write-meta (first args))
+                                        (write-fn (first args)))})
+                              (catch Exception e
+                                (write out
+                                       {"ex-data" (write-fn {:args args})
+                                        "ex-message" (.getMessage e)
+                                        "status" ["done" "error"]
+                                        "id" id})))
+                            pod.test-pod/return-python-code
+                            (try 
+                              (let [code-type (first args)
+                                    ret (case code-type
+                                          "function" 
+                                          {"code" {"python" "def multiply_by_three(x):\n    return x * 3"
+                                                   "clojure" "(defn multiply-by-three [x] (* x 3))"}}
+                                          
+                                          "expression"
+                                          {"code" {"python" "result = 42 + 8"
+                                                   "clojure" "(def result (+ 42 8))"}}
+                                          
+                                          "complex"
+                                          {"code" {"python" "import math\ndef calculate_area(radius):\n    return math.pi * radius * radius\narea = calculate_area(5)"
+                                                   "clojure" "(defn calculate-area [radius] (* Math/PI radius radius))\n(def area (calculate-area 5))"}}
+                                          
+                                          ;; Default case - just python code
+                                          {"code" "simple_value = 'Hello from executed Python code!'"})]
+                                (write out
+                                       {"value" (write-fn ret)
+                                        "id" id
+                                        "status" ["done"]}))
+                              (catch Exception e
+                                (write out
+                                       {"ex-data" (write-fn {:args args})
+                                        "ex-message" (.getMessage e)
+                                        "status" ["done" "error"]
+                                        "id" id})))
+                            pod.test-pod/define-add2
+                            (try
+                              (let [ret {"code" "(defn add2 [x] (+ 2 x))"}]  ; Fixed [x] instead of [x)
+                                (write out
+                                       {"value" (write-fn ret)  ; Use write-fn for consistent serialization
+                                        "id" id
+                                        "status" ["done"]}))
+                              (catch Exception e
+                                (write out
+                                       {"id" id
+                                        "ex-data" (write-fn {:args args})
+                                        "ex-message" (.getMessage e)
+                                        "status" ["done" "error"]})))
+                            )
                           (recur))
                 :shutdown (System/exit 0)
                 :load-ns (let [ns (-> (get message "ns")

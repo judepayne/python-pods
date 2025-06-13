@@ -1,41 +1,36 @@
-import os
 import sys
+import os
 import json
 import uuid
 import socket
 import subprocess
 import threading
 import time
+import inspect
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable, Union
 from concurrent.futures import Future, ThreadPoolExecutor
 import bencodepy as bencode
 from bencode_reader import read_message as read_bencode_stream
-from transit.writer import Writer
-from transit.reader import Reader
+import transit2
+from transit2 import WithMeta
 import edn
 from resolver import resolve
 import time
 import types
+from patch_registry import PatchRegistry
+from pod_modules import (
+    expose_non_deferred_namespaces,
+    unregister_pod_modules,
+    namespace_to_module_name,
+    loaded_namespaces,
+    list_pod_modules
+)
 
 # Global state
 pods = {}
-loaded_namespaces = {} #tracks namespaces loaded from pods
-transit_read_handlers = {}
-transit_read_handler_maps = {}
-transit_write_handlers = {}
-transit_write_handler_maps = {}
-transit_default_write_handlers = {}
 
-# Thread-local storage for pod-id
-import threading
-_thread_local = threading.local()
-
-def get_pod_id():
-    return getattr(_thread_local, 'pod_id', None)
-
-def set_pod_id(pod_id):
-    _thread_local.pod_id = pod_id
+_patch_registry = PatchRegistry()
 
 def warn(*args):
     print(*args, file=sys.stderr)
@@ -54,6 +49,8 @@ def bytes_to_string(data):
 def bytes_to_boolean(data):
     if isinstance(data, bytes):
         return data.decode('utf-8') == 'true'
+    elif isinstance(data, str):
+        return data == 'true'
     return data
 
 def get_string(m, k):
@@ -67,232 +64,38 @@ def get_maybe_boolean(m, k):
     value = m.get(k)
     return bytes_to_boolean(value) if value is not None else None
 
+def python_specific(maybe_dict):
+    if isinstance(maybe_dict, dict):
+        return maybe_dict.get("python")
+    else:
+        return None
+
 class PodError(Exception):
     def __init__(self, message, data=None):
         super().__init__(message)
         self.data = data or {}
 
-# Code required to expose pod namespaces as python modules
-def namespace_to_module_name(ns_name):
-    """Convert pod namespace to Python module name"""
-    # Convert pod.lispyclouds.docker -> pod_lispyclouds_docker
-    return ns_name.replace('.', '_').replace('-', '_')
-
-def expose_namespace_as_module(pod, namespace):
-    """Register pod namespace as an importable Python module"""
-    ns_name = namespace["name"]
-    ns_vars = namespace["vars"]
-    pod_id = pod["pod_id"]
-    
-    # Create the module name
-    module_name = namespace_to_module_name(ns_name)
-    
-    # Create a new module
-    module = types.ModuleType(module_name)
-    
-    # Add metadata
-    module.__doc__ = f"Pod namespace: {ns_name}"
-    module.__pod_namespace__ = ns_name
-    module.__pod_id__ = pod_id
-    
-    # Add functions to the module
-    for func_name, func in ns_vars.items():
-        # Add with original name (kebab-case)
-        setattr(module, func_name, func)
-        
-        # Also add Python-style name (snake_case) for convenience
-        python_name = func_name.replace('-', '_')
-        if python_name != func_name:
-            setattr(module, python_name, func)
-    
-    # Register in sys.modules so it can be imported
-    sys.modules[module_name] = module
-    
-    # Track the loaded namespace
-    if pod_id not in loaded_namespaces:
-        loaded_namespaces[pod_id] = {}
-    loaded_namespaces[pod_id][ns_name] = namespace
-    
-    print(f"📦 Registered module: {module_name} (namespace: {ns_name})")
-    print(f"   Functions: {list(ns_vars.keys())}")
-    
-    return module
-
-def expose_non_deferred_namespaces(pod):
-    """Expose only non-deferred pod namespaces as importable modules"""
-    modules = []
-    for namespace in pod["namespaces"]:
-        defer = namespace.get("defer", False)
-        if not defer:  # Only expose if defer is False or None
-            module = expose_namespace_as_module(pod, namespace)
-            modules.append(module)
-        else:
-            print(f"⏳ Deferred namespace: {namespace['name']} (will load on demand)")
-    return modules
-
-def load_and_expose_namespace(pod_id, namespace_name):
-    """Load a deferred namespace and expose it as a module"""
-    pod = lookup_pod(pod_id)
-    if not pod:
-        raise ValueError(f"Pod {pod_id} not found")
-    
-    # Check if already loaded
-    if (pod_id in loaded_namespaces and 
-        namespace_name in loaded_namespaces[pod_id]):
-        print(f"✅ Namespace {namespace_name} already loaded")
-        return loaded_namespaces[pod_id][namespace_name]
-    
-    # Find the namespace in the pod's deferred namespaces
-    deferred_namespace = None
-    for namespace in pod["namespaces"]:
-        if namespace["name"] == namespace_name and namespace.get("defer", False):
-            deferred_namespace = namespace
-            break
-    
-    if not deferred_namespace:
-        raise ValueError(f"Deferred namespace {namespace_name} not found in pod {pod_id}")
-    
-    # Load the namespace from the pod
-    result = load_ns(pod, namespace_name)
-    
-    # If load_ns returns a namespace dict, use it; otherwise use the existing one
-    if isinstance(result, dict) and "name" in result:
-        # Update the namespace with loaded vars
-        deferred_namespace.update(result)
-    
-    # Now expose it as a module
-    module = expose_namespace_as_module(pod, deferred_namespace)
-    
-    print(f"🚀 Loaded and registered deferred namespace: {namespace_name}")
-    return deferred_namespace
-
-def list_pod_modules():
-    """List all currently registered pod modules"""
-    pod_modules = {name: module for name, module in sys.modules.items() 
-                   if hasattr(module, '__pod_namespace__')}
-    
-    if not pod_modules:
-        print("No pod modules currently registered")
-        return
-    
-    print("Registered pod modules:")
-    for module_name, module in pod_modules.items():
-        ns_name = module.__pod_namespace__
-        pod_id = module.__pod_id__
-        functions = [name for name in dir(module) 
-                    if not name.startswith('_') and callable(getattr(module, name))]
-        print(f"  {module_name} (namespace: {ns_name}, pod: {pod_id})")
-        print(f"    Functions: {functions}")
-
-def list_deferred_namespaces(pod_id=None):
-    """List deferred namespaces for a pod or all pods"""
-    if pod_id:
-        pod = lookup_pod(pod_id)
-        if not pod:
-            print(f"Pod {pod_id} not found")
-            return
-        pods_to_check = {pod_id: pod}
+# Transit
+def get_transit_read_fn(pod):
+    """Get transit read function using pod's transit instance"""
+    transit_instance = pod.get("transit_instance")
+    if transit_instance:
+        return transit_instance.read
     else:
-        pods_to_check = pods
-    
-    deferred_found = False
-    for pid, pod in pods_to_check.items():
-        pod_deferred = []
-        for namespace in pod["namespaces"]:
-            if namespace.get("defer", False):
-                is_loaded = (pid in loaded_namespaces and 
-                           namespace["name"] in loaded_namespaces[pid])
-                status = "loaded" if is_loaded else "not loaded"
-                pod_deferred.append(f"    {namespace['name']} ({status})")
-        
-        if pod_deferred:
-            deferred_found = True
-            print(f"Pod {pid} deferred namespaces:")
-            for ns_info in pod_deferred:
-                print(ns_info)
-    
-    if not deferred_found:
-        print("No deferred namespaces found")
+        # Fallback for pods without transit instance
+        import transit2
+        return lambda s: transit2.transit_json_read_with_metadata(s)
 
-def unregister_pod_modules(pod_id):
-    """Unregister all modules from a specific pod"""
-    to_remove = []
-    for module_name, module in sys.modules.items():
-        if hasattr(module, '__pod_id__') and module.__pod_id__ == pod_id:
-            to_remove.append(module_name)
-    
-    for module_name in to_remove:
-        del sys.modules[module_name]
-        print(f"🗑️  Unregistered module: {module_name}")
-    
-    # Clean up loaded namespaces tracking
-    loaded_namespaces.pop(pod_id, None)
+def get_transit_write_fn(pod):
+    """Get transit write function using pod's transit instance"""
+    transit_instance = pod.get("transit_instance")
+    if transit_instance:
+        return transit_instance.write
+    else:
+        # Fallback for pods without transit instance
+        import transit2
+        return lambda data: transit2.transit_json_write_with_metadata(data)
 
-# Update the load_ns function to work with deferred loading
-def load_ns_enhanced(pod, namespace_name):
-    """Enhanced load_ns that works with the module system"""
-    # Call the original load_ns function
-    result = load_ns(pod, namespace_name)
-    
-    # If this was a deferred namespace, expose it as a module
-    pod_id = pod["pod_id"]
-    
-    # Check if this namespace was deferred and not yet loaded
-    for namespace in pod["namespaces"]:
-        if (namespace["name"] == namespace_name and 
-            namespace.get("defer", False) and
-            (pod_id not in loaded_namespaces or 
-             namespace_name not in loaded_namespaces[pod_id])):
-            
-            # Update the namespace with the loaded result if it's a dict
-            if isinstance(result, dict) and "vars" in result:
-                namespace.update(result)
-            
-            # Expose as module
-            expose_namespace_as_module(pod, namespace)
-            break
-    
-    return result
-# End Code required to expose pod namespaces as python modules
-
-# def update_transit_read_handler_map(pod_id):
-#     if pod_id in transit_read_handlers:
-#         handlers = transit_read_handlers[pod_id]
-#         transit_read_handler_maps[pod_id] = transit.create_read_handler_map(handlers)
-
-# def add_transit_read_handler(tag, fn, pod_id=None):
-#     pod_id = pod_id or get_pod_id()
-#     if pod_id not in transit_read_handlers:
-#         transit_read_handlers[pod_id] = {}
-#     transit_read_handlers[pod_id][tag] = fn
-#     update_transit_read_handler_map(pod_id)
-
-# def update_transit_write_handler_map(pod_id):
-#     if pod_id in transit_write_handlers:
-#         handlers = transit_write_handlers[pod_id]
-#         transit_write_handler_maps[pod_id] = transit.create_write_handler_map(handlers)
-
-# def add_transit_write_handler(classes, tag, fn, pod_id=None):
-#     pod_id = pod_id or get_pod_id()
-#     if pod_id not in transit_write_handlers:
-#         transit_write_handlers[pod_id] = {}
-#     for cls in classes:
-#         transit_write_handlers[pod_id][cls] = (tag, fn)
-#     update_transit_write_handler_map(pod_id)
-
-# def set_default_transit_write_handler(tag_fn, val_fn, pod_id=None):
-#     pod_id = pod_id or get_pod_id()
-#     transit_default_write_handlers[pod_id] = (tag_fn, val_fn)
-
-# def transit_json_read(pod_id, s):
-#     handler_map = transit_read_handler_maps.get(pod_id, {})
-#     return transit.read(transit.reader('json', handler_map=handler_map), s)
-
-# def transit_json_write(pod_id, obj, metadata=False):
-#     handler_map = transit_write_handler_maps.get(pod_id, {})
-#     default_handler = transit_default_write_handlers.get(pod_id)
-#     writer = transit.writer('json', handler_map=handler_map, default_handler=default_handler)
-#     return transit.write(writer, obj)
 
 def write_message(stream, message):
     """Write a bencode message to stream"""
@@ -308,8 +111,13 @@ def read_message(stream):
         return None
 
 def bencode_to_vars(pod, ns_name_str, vars_list):
-    """Convert bencode vars to Python functions"""
+    """Convert bencode vars to Python functions with __doc__, __module__, and __meta__ support"""
     result = {}
+    
+    # Get the Python module name for this namespace
+    module_name = namespace_to_module_name(ns_name_str)
+
+    edn_instance = pod.get("edn_instance")
     
     for var in vars_list:
         name = get_string(var, "name")
@@ -319,25 +127,48 @@ def bencode_to_vars(pod, ns_name_str, vars_list):
         meta_str = get_maybe_string(var, "meta")
         arg_meta = get_maybe_boolean(var, "arg-meta")
         
-        var_meta = None
+        # Parse metadata to extract doc string and full metadata
+        doc_string = None
+        var_meta = {}
         if meta_str:
             try:
-                var_meta = edn.from_edn(meta_str)
-            except:
-                pass
+                if edn_instance:
+                    var_meta = edn_instance.read(meta_str)
+                    doc_string = var_meta.get("doc")
+                else:
+                    # Fallback for non-EDN formats - try basic parsing
+                    import ast
+                    try:
+                        var_meta = ast.literal_eval(meta_str)
+                        doc_string = var_meta.get("doc")
+                    except:
+                        var_meta = {}
+            except Exception as e:
+                print(f"Warning: Could not parse metadata for {name}: {e}", file=sys.stderr)
+                var_meta = {}
         
         if code:
             # If code is provided, use it directly
             result[name] = code
         else:
             # Create a function that invokes the pod
-            def create_invoker(var_name, is_async, arg_meta):
-                def invoker(*args):
-                    return invoke(pod, f"{ns_name_str}/{var_name}", list(args), 
-                                {"async": is_async, "arg_meta": arg_meta})
+            def create_invoker(var_name, is_async, arg_meta, doc, mod_name, metadata):
+                def invoker(*args, _is_async=is_async, _arg_meta=arg_meta):
+                    opts_dict = {"async": _is_async, "arg_meta": _arg_meta}
+                    return invoke(pod, f"{ns_name_str}/{var_name}", list(args), opts_dict)
+                
+                # Set standard Python attributes
+                invoker.__name__ = var_name
+                invoker.__module__ = mod_name
+                if doc:
+                    invoker.__doc__ = doc
+                
+                # Set custom metadata catch-all
+                invoker.__meta__ = metadata
+                
                 return invoker
             
-            result[name] = create_invoker(name, is_async, arg_meta)
+            result[name] = create_invoker(name, is_async, arg_meta, doc_string, module_name, var_meta)
     
     return result
 
@@ -348,14 +179,27 @@ def invoke(pod, pod_var, args, opts=None):
     stream = pod["stdin"]
     format_type = pod["format"]
     chans = pod["chans"]
+    arg_meta = opts.get("arg_meta", False)
+
+    # unwrap any metadata when arg_meta is not True
+    processed_args = []
+    if not arg_meta:
+        for arg in args:
+            if isinstance(arg, WithMeta):
+                processed_args.append(arg.value)
+            else:
+                processed_args.append(arg)
+    else:
+        processed_args = args
     
     # Determine write function based on format
     if format_type == "edn":
-        write_fn = edn.to_edn
+        edn_instance = pod.get("edn_instance")
+        write_fn = edn_instance.write
     elif format_type == "json":
         write_fn = json.dumps
-    # elif format_type == "transit+json":
-    #     write_fn = lambda x: transit_json_write(pod["pod_id"], x, opts.get("arg_meta", False))
+    elif format_type == "transit+json":
+        write_fn = get_transit_write_fn(pod)
     else:
         write_fn = str
     
@@ -372,13 +216,121 @@ def invoke(pod, pod_var, args, opts=None):
         "id": msg_id,
         "op": "invoke",
         "var": str(pod_var),
-        "args": write_fn(args)
+        "args": write_fn(processed_args)
     }
     
     write_message(stream, message)
     
     if not handlers:
         result = chan.result()  # This will block until result is available
+        
+        # STEP 1: Apply result transform patch if it exists (BEFORE function patches)
+        pod_id = pod["pod_id"]
+        transform_function = _patch_registry.get_result_transform_patch(pod_id, str(pod_var))
+        if transform_function:
+            try:
+                result = transform_function(result)
+                print(f"🔄 Applied result transform for {pod_var}")
+            except Exception as e:
+                warn(f"Result transform failed for {pod_var}: {e}")
+                # Keep original result on error
+        
+        # STEP 2: Handle client-side code execution (code patches)
+        python_code = None  # Initialize python_code
+        
+        if isinstance(result, dict) and "code" in result:
+            code_value = result["code"]
+            
+            # Check for Python-specific code
+            python_code = python_specific(code_value) if isinstance(code_value, dict) else code_value
+            
+            # Apply code patches if they exist
+            patched_code = _patch_registry.get_code_patch(pod_id, str(pod_var))
+            
+            if patched_code:
+                # Code patches completely replace the pod function
+                try:
+                    # Execute the patch code with access to original args
+                    # Create execution environment with args available
+                    exec_globals = {
+                        '__builtins__': __builtins__,
+                        'args': args,  # Make args available to the code
+                    }
+                    exec_locals = {}
+                    
+                    # Execute the patched code
+                    exec(patched_code, exec_globals, exec_locals)
+                    
+                    # Look for a return value in locals
+                    if 'result' in exec_locals:
+                        result = exec_locals['result']
+                    elif len(exec_locals) == 1:
+                        # If only one variable was created, use it as result
+                        result = list(exec_locals.values())[0]
+                    else:
+                        # Return all non-private variables
+                        result = {k: v for k, v in exec_locals.items() if not k.startswith('_')}
+                    
+                    print(f"🔧 Applied code patch for {pod_var}")
+                    
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+                except Exception as e:
+                    warn(f"Code patch failed for {pod_var}: {e}")
+                    # Fall back to original python_code if patch fails
+        
+        # STEP 3: Execute original python code if no function patch was applied
+        if python_code:
+            print(f"🔍 Executing Python code: {repr(python_code)}") 
+            try:
+                # Find the first frame outside python_pods module
+                current_frame = inspect.currentframe()
+                target_frame = current_frame.f_back
+
+                # Walk up the call stack until we find a frame not in python_pods
+                while target_frame:
+                    frame_file = target_frame.f_globals.get('__file__', '')
+                    frame_name = target_frame.f_globals.get('__name__', '')
+                    
+                    # Check if this frame is from the test file (more specific check)
+                    if ('test_json.py' in frame_file or 
+                        frame_name == '__main__' or 
+                        ('python_pods' not in frame_file and frame_file)):
+                        break
+                    target_frame = target_frame.f_back
+
+                if target_frame:
+                    caller_globals = target_frame.f_globals
+                else:
+                    # Fallback to immediate caller if we can't find a suitable frame
+                    warn("Could not find target frame for code execution, using immediate caller")
+                    caller_globals = current_frame.f_back.f_globals
+
+                # Execute in caller's environment so variables/functions persist
+                exec(python_code, caller_globals)
+                
+                # For the return value, prefer calculated values over functions/modules
+                exec_locals = {}
+                exec(python_code, caller_globals, exec_locals)
+                
+                non_private = {k: v for k, v in exec_locals.items() if not k.startswith('_')}
+                if len(non_private) == 1:
+                    result = list(non_private.values())[0]
+                elif non_private:
+                    # Prefer non-function, non-module values (like calculated results)
+                    values_only = {k: v for k, v in non_private.items() 
+                                if not callable(v) and not hasattr(v, '__file__')}
+                    if len(values_only) == 1:
+                        result = list(values_only.values())[0]
+                    else:
+                        result = non_private  # Return everything if no clear preference
+                # If no results, keep original result
+                    
+            except Exception as e:
+                warn(f"Failed to execute client code: {e}")
+                # Keep original result on error
+        
         if isinstance(result, Exception):
             raise result
         return result
@@ -425,12 +377,14 @@ def processor(pod):
     
     # Determine read function based on format
     if format_type == "edn":
+        edn_instance = pod.get("edn_instance")
         def read_fn(s):
             try:
-                return edn.from_edn(s)
+                return edn_instance.read(s)
             except Exception as e:
                 print(f"Cannot read EDN: {repr(s)}", file=sys.stderr)
                 raise e
+
     elif format_type == "json":
         def read_fn(s):
             try:
@@ -438,17 +392,16 @@ def processor(pod):
             except Exception as e:
                 print(f"Cannot read JSON: {repr(s)}", file=sys.stderr)
                 raise e
-    # elif format_type == "transit+json":
-    #     def read_fn(s):
-    #         try:
-    #             return transit_json_read(pod_id, s)
-    #         except Exception as e:
-    #             print(f"Cannot read Transit JSON: {repr(s)}", file=sys.stderr)
-    #             raise e
+    elif format_type == "transit+json":
+        read_fn_with_transforms = get_transit_read_fn(pod)
+        def read_fn(s):
+            try:
+                return read_fn_with_transforms(s)
+            except Exception as e:
+                print(f"Cannot read Transit JSON: {repr(s)}", file=sys.stderr)
+                raise e
     else:
         read_fn = str
-    
-    set_pod_id(pod_id)
     
     try:
         while True:
@@ -545,6 +498,14 @@ def processor(pod):
     except Exception as e:
         print(f"Processor error: {e}", file=sys.stderr)
 
+        chans = pod["chans"]
+        for msg_id, chan in chans.items():
+            if isinstance(chan, Future) and not chan.done():
+                chan.set_exception(PodError(f"Pod process failed: {e}"))
+        
+        # Clear the channels
+        chans.clear()
+
 def get_pod_id_from_spec(x):
     """Extract pod ID from pod spec"""
     if isinstance(x, dict):
@@ -590,20 +551,6 @@ def destroy(pod_id_or_pod):
     
     pods.pop(pod_id, None)
     return None
-
-def read_readers(reply, resolve_fn):
-    """Read reader functions from reply"""
-    readers_dict = reply.get("readers")
-    if not readers_dict:
-        return {}
-    
-    result = {}
-    for k, v in readers_dict.items():
-        key = k if isinstance(k, str) else bytes_to_string(k)
-        val = bytes_to_string(v) if isinstance(v, bytes) else v
-        result[key] = resolve_fn(val)
-    
-    return result
 
 def bencode_to_namespace(pod, namespace):
     """Convert bencode namespace to Python namespace"""
@@ -691,7 +638,7 @@ def run_pod(pod_spec, opts=None):
         # For stdio transport, redirect stderr to inherit, capture stdout
         stdout = subprocess.PIPE
         stderr = None  # Will inherit
-    
+
     # Start the process
     process = subprocess.Popen(
         pod_spec,
@@ -755,7 +702,7 @@ def describe_to_ops(describe_reply):
     # Convert keys to a set of operation names
     return set(ops_dict.keys())
 
-def describe_to_metadata(describe_reply, resolve_fn=None):
+def describe_to_metadata(describe_reply, resolve_readers=False):
     """Extract metadata from describe reply"""
     format_bytes = describe_reply.get("format")
     format_str = bytes_to_string(format_bytes) if format_bytes else "edn"
@@ -764,8 +711,8 @@ def describe_to_metadata(describe_reply, resolve_fn=None):
     ops = describe_to_ops(describe_reply)
     
     readers = {}
-    if format_type == "edn" and resolve_fn:
-        readers = read_readers(describe_reply, resolve_fn)
+    if format_type == "edn" and resolve_readers:
+        readers = describe_reply.get("readers")
     
     return {
         "format": format_type,
@@ -826,7 +773,7 @@ def load_pod(pod_spec, opts=None):
     final_opts = resolved["opts"]
     
     remove_ns = final_opts.get("remove_ns")
-    resolve_fn = final_opts.get("resolve")
+    resolve_readers = final_opts.get("resolve", False)
     
     # Start the pod process
     running_pod = run_pod(final_pod_spec, final_opts)
@@ -843,22 +790,48 @@ def load_pod(pod_spec, opts=None):
         reply = describe_pod(running_pod)
 
     # Extract metadata
-    metadata = describe_to_metadata(reply, resolve_fn)
+    metadata = describe_to_metadata(reply, resolve_readers)
     format_type = metadata["format"]
     ops = metadata["ops"]
     readers = metadata["readers"]
-    
-    # Get pod namespaces
+
+    # Get pod namespaces FIRST
     pod_namespaces_raw = reply.get("namespaces", [])
-    
-    # Determine pod ID
-    pod_id = None
-    if pod_namespaces_raw:
+
+    # Determine pod_id for patch lookup
+    potential_pod_id = None
+    if isinstance(pod_spec, str) and '/' in pod_spec:
+        # For registry pods, use the pod spec as ID
+        potential_pod_id = pod_spec
+    elif pod_namespaces_raw:
+        # For local pods, use first namespace (following babashka logic)
         first_ns = pod_namespaces_raw[0]
-        pod_id = get_string(first_ns, "name")
+        potential_pod_id = get_string(first_ns, "name")
+
+    edn_instance = None
+    if format_type == "edn":
+        # Priority: patches > pod-provided python readers > empty dict
+        if potential_pod_id:
+            patched_readers = _patch_registry.get_edn_reader_patches(potential_pod_id)
+            if patched_readers:
+                edn_instance = edn.Edn(patched_readers)
+            else:
+                pod_readers = python_specific(readers) or {}
+                edn_instance = edn.Edn(pod_readers)
+        else:
+            pod_readers = python_specific(readers) or {}
+            edn_instance = edn.Edn(pod_readers)
+
+    transit_instance = None
+    if format_type == "transit+json":
+        import transit2
+        transit_instance = transit2.Transit(
+            pod_readers=python_specific(readers),
+            pod_writers=None
+        )
     
-    if not pod_id:
-        pod_id = next_id()
+    # Use the potential_pod_id we already determined, or fall back to UUID
+    pod_id = potential_pod_id or next_id()
     
     # Create the pod object
     pod = {
@@ -873,7 +846,10 @@ def load_pod(pod_spec, opts=None):
         "err": sys.stderr,
         "remove_ns": remove_ns,
         "readers": readers,
-        "pod_id": pod_id
+        "pod_id": pod_id,
+        "edn_instance": edn_instance,
+        "transit_instance": transit_instance,
+        "socket": sock
     }
     
     # Process namespaces
@@ -897,11 +873,6 @@ def load_pod(pod_spec, opts=None):
     processor_thread = threading.Thread(target=processor, args=(pod,))
     processor_thread.daemon = True
     processor_thread.start()
- #   with ThreadPoolExecutor() as executor:
- #       future = executor.submit(processor, pod)
-
-
-    print('completed!')
     pod["processor_thread"] = processor_thread
     
     # Store the pod
@@ -955,32 +926,6 @@ def load_ns(pod, namespace_name):
     
     return result
 
-# Suggest by Claude. TODO. Do I need this?
-def list_available_namespaces(pod_id=None):
-    """List all available namespaces (loaded and deferred)"""
-    if pod_id:
-        pod = lookup_pod(pod_id)
-        if not pod:
-            print(f"Pod {pod_id} not found")
-            return
-        pods_to_check = {pod_id: pod}
-    else:
-        pods_to_check = pods
-    
-    for pid, pod in pods_to_check.items():
-        print(f"\nPod {pid} namespaces:")
-        for namespace in pod["namespaces"]:
-            defer = namespace.get("defer", False)
-            is_loaded = (pid in loaded_namespaces and 
-                        namespace["name"] in loaded_namespaces[pid])
-            
-            if defer:
-                status = "deferred (loaded)" if is_loaded else "deferred (not loaded)"
-            else:
-                status = "loaded"
-            
-            print(f"  {namespace['name']} - {status}")
-
 def invoke_public(pod_id_or_pod, fn_sym, args, opts=None):
     """Invoke a public function in a pod"""
     opts = opts or {}
@@ -997,64 +942,107 @@ def unload_pod(pod_id_or_pod):
     """Unload/destroy a pod"""
     return destroy(pod_id_or_pod)
 
-# not used yet
-def expose_pod_functions_locally(pod):
-    """Expose pod functions in the caller's local namespace"""
-    import inspect
-    caller_locals = inspect.currentframe().f_back.f_locals
+def add_transit_read_handler(pod_id, tag, handler_class):
+    """Add a transit read handler class for a specific tag
     
-    for namespace in pod["namespaces"]:
-        ns_name = namespace["name"]
-        ns_vars = namespace["vars"]
-        defer = namespace["defer"]
+    Args:
+        tag (str): The transit tag to handle
+        handler_class: A class with a static 'from_rep' method
+    
+    Example:
+        class MyTypeReadHandler:
+            @staticmethod
+            def from_rep(rep):
+                return MyType(rep)
         
-        print(f"📦 Exposing functions from namespace: {ns_name}")
+        add_transit_read_handler("my-type", MyTypeReadHandler)
+    """
+    pod = lookup_pod(pod_id)
+    if not pod:
+        raise RuntimeError(f"Pod {pod_id} not found")
+    
+    transit_instance = pod.get("transit_instance")
+    if not transit_instance:
+        raise RuntimeError("Pod does not have a transit instance (not using transit+json format?)")
+    
+    transit_instance.add_read_handler(tag, handler_class)
+    return None
+
+def add_transit_write_handler(pod_id, classes, handler_class):
+    """Add a transit write handler class for specific classes
+    
+    Args:
+        classes: A class or list of classes to handle
+        handler_class: A class with static 'tag' and 'rep' methods
+    
+    Example:
+        class MyTypeWriteHandler:
+            @staticmethod
+            def tag(obj):
+                return "my-type"
+            
+            @staticmethod
+            def rep(obj):
+                return obj.serialize()
         
-        for func_name, func in ns_vars.items():
-            if callable(func):  # Only add actual functions
-                caller_locals[func_name] = func
-                
-                # Also add Python-style name
-                python_name = func_name.replace('-', '_')
-                if python_name != func_name:
-                    caller_locals[python_name] = func
-                
-                print(f"  ✅ {func_name}" + (f" (also as {python_name})" if python_name != func_name else ""))
+        add_transit_write_handler([MyType], MyTypeWriteHandler)
+    """    
+    pod = lookup_pod(pod_id)
+    if not pod:
+        raise RuntimeError(f"Pod {pod_id} not found")
+    
+    transit_instance = pod.get("transit_instance")
+    if not transit_instance:
+        raise RuntimeError("Pod does not have a transit instance (not using transit+json format?)")
+    
+    transit_instance.add_write_handler(classes, handler_class)
+    return None
 
+def set_default_transit_write_handler(pod_id, handler_class):
+    """Set a default transit write handler class for unregistered types
+    
+    Args:
+        handler_class: A class with static 'tag' and 'rep' methods
+    
+    Example:
+        class DefaultWriteHandler:
+            @staticmethod
+            def tag(obj):
+                return type(obj).__name__
+            
+            @staticmethod
+            def rep(obj):
+                return str(obj)
+        
+        set_default_transit_write_handler(DefaultWriteHandler)
+    """
+    pod = lookup_pod(pod_id)
+    if not pod:
+        raise RuntimeError(f"Pod {pod_id} not found")
+    
+    transit_instance = pod.get("transit_instance")
+    if not transit_instance:
+        raise RuntimeError("Pod does not have a transit instance (not using transit+json format?)")
+    
+    transit_instance.set_default_write_handler(handler_class)
+    return None
 
-pod = load_pod(["clojure", "-M:test-pod"])
+def register_code_patch(pod_id, function_name, python_code):
+    """Register a code patch with arbitrary Python code for a specific pod and function"""
+    _patch_registry.register_code_patch(pod_id, function_name, python_code)
 
-# res = invoke_public(pod["pod_id"], "pod.test-pod/add-one", [5])
+def register_edn_reader_patch(pod_id, tag, reader_function):
+    """Register an EDN reader patch for a specific pod and tag"""
+    _patch_registry.register_edn_reader_patch(pod_id, tag, reader_function)
 
-import pod_test_pod as test_pod # type: ignore
+def register_result_transform_patch(pod_id, function_name, transform_function):
+    """Register a result transform patch to convert pod results to Python-friendly forms"""
+    _patch_registry.register_result_transform_patch(pod_id, function_name, transform_function)
 
-res1 = test_pod.add_one(5)
+def clear_patches(pod_id=None):
+    """Clear registered patches"""
+    _patch_registry.clear_patches(pod_id)
 
-print(res1)
-
-dict1 = {
-    "user": {
-        "name": "Alice",
-        "age": 28,
-        "settings": {
-            "theme": "dark",
-            "notifications": True
-        }
-    },
-    "items": ["apple", "banana", "cherry"]
-}
-
-dict2 = {
-    "user": {
-        "name": "Alice",
-        "age": 29,
-        "settings": {
-            "theme": "light"
-        }
-    },
-    "items": ["apple", "banana", "cherry", "strawberries"]
-}
-
-res2 = test_pod.deep_merge(dict1, dict2)
-
-print(res2)
+def list_patches(pod_id=None):
+    """List all registered patches"""
+    _patch_registry.list_patches(pod_id)
