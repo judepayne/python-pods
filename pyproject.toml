@@ -5,7 +5,6 @@ description = "A faithful port of babashka pods to python"
 readme = "README.md"
 requires-python = ">=3.13"
 license = {text = "MIT"}
-Homepage = "https://github.com/judepayne/python-pods"
 dependencies = [
     "bencode-py>=4.0.0",
     "edn-format>=0.7.5",
@@ -14,3 +13,5 @@ dependencies = [
     "tomli>=2.2.1",
     "transit-python2>=0.8.321",
 ]
+[project.urls]
+Homepage = "https://github.com/judepayne/python-pods"
