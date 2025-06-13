@@ -66,7 +66,7 @@ def get_maybe_boolean(m, k):
 
 def python_specific(maybe_dict):
     if isinstance(maybe_dict, dict):
-        return maybe_dict.get("python")
+        return maybe_dict.get("py")
     else:
         return None
 

@@ -186,7 +186,7 @@
                                            :json "json"
                                            :transit+json "transit+json")
                                 "readers" (case format
-                                            :edn {:python
+                                            :edn {:py
                                                   {"person" "def read_person(data):\n    return {\n        'type': 'Person',\n        'name': data['name'],\n        'age': data['age'],\n        'description': f\"{data['name']} is {data['age']} years old\"\n    }"
                                                    "date" "def read_date(date_str):\n    from datetime import datetime\n    return {\n        'type': 'Date',\n        'value': date_str,\n        'parsed': datetime.fromisoformat(date_str)\n    }"}}
                                             {}) ; No readers for JSON/Transit
@@ -294,16 +294,16 @@
                               (let [code-type (first args)
                                     ret (case code-type
                                           "function" 
-                                          {"code" {"python" "def multiply_by_three(x):\n    return x * 3"
-                                                   "clojure" "(defn multiply-by-three [x] (* x 3))"}}
+                                          {"code" {"py" "def multiply_by_three(x):\n    return x * 3"
+                                                   "clj" "(defn multiply-by-three [x] (* x 3))"}}
                                           
                                           "expression"
-                                          {"code" {"python" "result = 42 + 8"
-                                                   "clojure" "(def result (+ 42 8))"}}
+                                          {"code" {"py" "result = 42 + 8"
+                                                   "clj" "(def result (+ 42 8))"}}
                                           
                                           "complex"
-                                          {"code" {"python" "import math\ndef calculate_area(radius):\n    return math.pi * radius * radius\narea = calculate_area(5)"
-                                                   "clojure" "(defn calculate-area [radius] (* Math/PI radius radius))\n(def area (calculate-area 5))"}}
+                                          {"code" {"py" "import math\ndef calculate_area(radius):\n    return math.pi * radius * radius\narea = calculate_area(5)"
+                                                   "clj" "(defn calculate-area [radius] (* Math/PI radius radius))\n(def area (calculate-area 5))"}}
                                           
                                           ;; Default case - just python code
                                           {"code" "simple_value = 'Hello from executed Python code!'"})]

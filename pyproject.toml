@@ -1,9 +1,11 @@
 [project]
-name = "python_pods"
+name = "python-pods"
 version = "0.1.0"
 description = "A faithful port of babashka pods to python"
 readme = "README.md"
 requires-python = ">=3.13"
+license = {text = "MIT"}
+Homepage = "https://github.com/judepayne/python-pods"
 dependencies = [
     "bencode-py>=4.0.0",
     "edn-format>=0.7.5",

@@ -1,8 +1,13 @@
-# Python Pods
+# python-pods
 
 A faithful port of the babashka pods library to python.
 
-Python Pods provides a way to invoke functionality from other programs (pods) and expose functionality to other programs. Pods are programs that implement the pod protocol, which is a simple bencode-based protocol for inter-process communication.
+![](img/IMG_8734.jpeg)
+
+python-pods allow interop with all pods that implement the pod protocol defined by [babashka pods](https://github.com/babashka/pods). You can load and run any pod from the [pod registry](https://github.com/babashka/pod-registry).
+
+python pods has a 'patch system' to override certain behaviour exposed by pods which expect the client to be clojure/ babashka. Details below.
+
 
 ## Features
 
@@ -21,13 +26,8 @@ Python Pods provides a way to invoke functionality from other programs (pods) an
 This project uses [uv](https://astral.sh/uv) as the Python package manager for fast and reliable dependency management.
 
 ```bash
-# Install uv first (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone the repository
-git clone https://github.com/your-username/python-pods
-cd python-pods
-
+# Install from Pypi
+uv add python-pods
 # Install dependencies and activate environment
 uv sync
 source .venv/bin/activate
@@ -36,14 +36,12 @@ source .venv/bin/activate
 ./run_test.sh
 ```
 
-For development workflows, uv automatically manages virtual environments and provides 10-100x faster dependency resolution compared to pip.
-
 ## Quick Start
 
 ```python
 import python_pods as pods
 
-# Load a pod from the babashka registry
+# Load a pod from the pod registry
 pod = pods.load_pod('org.babashka/instaparse', {'version': '0.0.6'})
 
 # Import the pod namespace as a Python module
@@ -55,29 +53,7 @@ result = insta.parse(parser, "aaaaabbbaaaabb")
 print(result)
 ```
 
-For a complete working example with result processing, see `test/test_instaparse.py` which demonstrates how to work with complex pod results including `WithMeta` objects and transit keywords.
-
-## Pod Registry Support
-
-Python Pods integrates with the [babashka pod registry](https://github.com/babashka/pod-registry) to automatically download and cache pods.
-
-### Loading Pods from Registry
-
-```python
-# Load a specific version from the registry
-pod = pods.load_pod('org.babashka/instaparse', {'version': '0.0.6'})
-
-# Load the latest version (if available)
-pod = pods.load_pod('org.babashka/postgresql', {'version': '0.5.0'})
-```
-
-### Registry Features
-
-- **Automatic downloading**: Pods are downloaded on first use and cached locally
-- **Version management**: Specify exact versions for reproducible builds
-- **Multi-platform support**: Automatically selects the correct binary for your OS/architecture
-- **Checksum verification**: Downloads are verified against SHA-256 checksums
-- **Caching**: Downloaded pods are cached in `~/.babashka/pods/repository/`
+For a complete working example with result processing, see `test/test_instaparse.py` which demonstrates how to work with complex pod results including `WithMeta` objects and transit keywords. `WithMeta` is a simple python class that allows you to work with pods that expect or return metadata along with data.
 
 ### Cache Management
 
@@ -95,78 +71,59 @@ The resolver automatically handles platform detection and will fall back to comp
 
 ## Patch System
 
-Python Pods includes a powerful patching system that allows you to modify pod behavior through `pyproject.toml` configuration. This enables you to add custom functionality, fix compatibility issues, or enhance pod functions without modifying the original pod code.
-
-### Configuring Patches
-
-Add patches to your `pyproject.toml` file:
-
-```toml
-[[tool.python-pods.patches]]
-pod = "org.babashka/instaparse"
-
-# EDN reader patches for custom data type handling
-[tool.python-pods.patches.readers]
-"person" = """
-def read_person(data):
-    return {
-        'type': 'Person',
-        'name': data['name'],
-        'age': data['age'],
-        'description': f"{data['name']} is {data['age']} years old"
-    }
-"""
-
-# Function patches to modify or enhance pod functions
-[tool.python-pods.patches.functions]
-"pod.babashka.instaparse/parse" = """
-def parse(parser, text, options=None):
-    # Get the original result from the pod
-    original_result = original_parse_function(parser, text, options)
-    
-    # Apply custom post-processing
-    def convert_parse_tree(node):
-        if hasattr(node, 'value') and hasattr(node, 'meta'):
-            # Convert WithMeta objects to Python dicts
-            value = node.value
-            if isinstance(value, list) and len(value) > 0:
-                tag = str(value[0]).replace('<Keyword ', '').replace(' >', '')
-                children = [convert_parse_tree(child) for child in value[1:]]
-                return {
-                    'tag': tag,
-                    'content': children
-                }
-        elif isinstance(node, list):
-            return [convert_parse_tree(child) for child in node]
-        return node
-    
-    return convert_parse_tree(original_result)
-"""
-```
+Python Pods includes a runtime patching system that allows you to modify pod behavior at runtime without changing pod code. This enables you to transform pod results, override functions, or add custom data type handling.
 
 ### Patch Types
 
-1. **Reader Patches**: Modify how EDN or Transit data is parsed
-   - Useful for handling custom data types from pods
-   - Applied during the deserialization phase
+**Result Transform Patches** - Transform pod function results after execution:
+```python
+# Transform complex pod results to Python-friendly formats
+def unwrap_withmeta(node):
+    # Convert WithMeta objects and transit keywords to clean Python data
+    # See test/test_instaparse.py for complete implementation
+    pass
 
-2. **Function Patches**: Replace or enhance pod function behavior
-   - Access to original function results via `original_*_function`
-   - Can modify inputs, outputs, or add completely new functionality
-   - Applied when pod functions are invoked
+pods.register_result_transform_patch(
+    pod_id, 
+    'pod.babashka.instaparse/parse', 
+    unwrap_withmeta
+)
+```
 
-### Patch Priority
+**Code Patches** - Replace pod functions entirely with Python code:
+```python
+python_code = """
+result = sum(args[0])  # args available in execution context
+"""
 
-Patches always take precedence over pod-provided functionality:
-1. **Function patches** override any code returned by the pod
-2. **Reader patches** override pod-provided EDN readers
-3. **Original functionality** is still accessible within patches
+pods.register_code_patch(pod_id, 'pod.example/sum-list', python_code)
+```
+(for pods with functions that return clj "code")
 
-This system is particularly useful for:
-- Converting complex pod results to Python-friendly formats
-- Adding type safety and validation
-- Implementing missing functionality
-- Working around pod compatibility issues
+**EDN Reader Patches** - Add custom EDN data type handlers:
+```python
+def read_person(data):
+    return Person(data['name'], data['age'])
+
+pods.register_edn_reader_patch(pod_id, 'person', read_person)
+```
+
+### Example Usage
+
+See `test/test_instaparse.py` for a complete example where result transform patches automatically clean up complex parse tree results with `WithMeta` objects and transit keywords.
+
+### Patch Management
+
+```python
+# List all registered patches
+pods.list_patches(pod_id)
+
+# Clear patches for specific pod or all pods
+pods.clear_patches(pod_id)  # specific pod
+pods.clear_patches()        # all pods
+```
+
+Patches are applied in order: result transforms, then code patches (if present), with code patches taking precedence over pod-provided functionality.
 
 ## Key Design Choices
 
@@ -183,9 +140,8 @@ One of the major design decisions in this library is automatically exposing pod 
 # After loading a pod, you can import and use it like any Python module
 import pod_test_pod as test_pod
 
-# Functions retain their original names and get snake_case aliases
-result1 = test_pod.deep_merge(dict1, dict2)  # kebab-case original
-result2 = test_pod.deep_merge(dict1, dict2)  # same function, different style
+# Function names are converted to snake case.
+result1 = test_pod.deep_merge(dict1, dict2)  # deep-merge was the function in test-pod
 ```
 
 ### Deferred Namespace Loading
@@ -199,6 +155,15 @@ pods.list_deferred_namespaces(pod_id)
 # Load a deferred namespace on demand
 pods.load_and_expose_namespace(pod_id, "pod.example.deferred-ns")
 ```
+
+Note pod_id is obtained from when you load a pod. e.g.
+
+````python
+pod = pods.load_pod('org.babashka/instaparse', {'version': '0.0.6'})
+pod_id = pod['id']
+````
+
+pod_id is used in several of the public api functions which are detailed below.
 
 ## Data Formats
 
@@ -309,7 +274,7 @@ The library automatically handles these common types with Transit:
 Python Pods supports rich metadata preservation using the official Transit `"with-meta"` tag:
 
 ```python
-from transit2 import WithMeta
+from python_pods import WithMeta
 
 # Create data with metadata
 data = [1, 2, 3, 4, 5]
@@ -327,7 +292,7 @@ else:
     print("Metadata was not preserved by this pod function")
 ```
 
-**Note**: Metadata preservation depends on the pod function being designed to handle metadata. Functions with `arg-meta` set to `true` in their pod definition will receive and can return `WithMeta` objects.
+**Note**: Metadata preservation depends on the pod function being designed to handle metadata. Functions with `arg-meta` set to `true` in their pod definition can receive (and maybe return) `WithMeta` objects.
 
 #### Working with Complex Transit Results
 
@@ -415,239 +380,200 @@ pod = pods.load_pod(["clojure", "-M:test-pod"])
 pod = pods.load_pod(["my-pod"], {"transport": "socket"})
 ```
 
-#### `invoke_public(pod_id, function_symbol, args, opts=None)`
+#### `unload_pod(pod_id_or_pod)`
+
+Shutdown and cleanup a pod.
+
+**Parameters:**
+- `pod_id_or_pod`: Pod ID string or pod object
+
+#### `invoke_public(pod_id_or_pod, function_symbol, args, opts=None)`
 
 Directly invoke a pod function without using module imports.
 
-#### `unload_pod(pod_id)`
+**Parameters:**
+- `pod_id_or_pod`: Pod ID string or pod object
+- `function_symbol`: Function name (e.g., "pod.namespace/function-name")
+- `args`: List of arguments to pass to the function
+- `opts`: Optional configuration dict
 
-Shutdown and cleanup a pod.
+### Patch System
+
+#### `register_result_transform_patch(pod_id, function_name, transform_function)`
+
+Register a function to transform pod results after execution.
+
+**Parameters:**
+- `pod_id`: Pod ID string
+- `function_name`: Full function name (e.g., "pod.namespace/function")
+- `transform_function`: Function that takes result and returns transformed result
+
+**Example:**
+```python
+def clean_result(result):
+    # Transform complex pod results to Python-friendly format
+    return result
+
+pods.register_result_transform_patch(pod_id, 'pod.example/parse', clean_result)
+```
+
+#### `register_code_patch(pod_id, function_name, python_code)`
+
+Replace a pod function entirely with Python code.
+
+**Parameters:**
+- `pod_id`: Pod ID string
+- `function_name`: Full function name (e.g., "pod.namespace/function")
+- `python_code`: Python code string (has access to `args` variable)
+
+**Example:**
+```python
+code = "result = sum(args[0])"
+pods.register_code_patch(pod_id, 'pod.example/sum-list', code)
+```
+
+#### `register_edn_reader_patch(pod_id, tag, reader_function)`
+
+Register a custom EDN reader for a specific tag.
+
+**Parameters:**
+- `pod_id`: Pod ID string
+- `tag`: EDN tag string (e.g., "person", "date")
+- `reader_function`: Function that takes tagged data and returns Python object
+
+#### `clear_patches(pod_id=None)`
+
+Clear registered patches.
+
+**Parameters:**
+- `pod_id`: Pod ID to clear (optional, clears all if None)
+
+#### `list_patches(pod_id=None)`
+
+List all registered patches.
+
+**Parameters:**
+- `pod_id`: Pod ID to list (optional, lists all if None)
 
 ### Module Management
 
 #### `list_pod_modules()`
 
-List all currently registered pod modules.
+List all currently registered pod modules and their functions.
 
 #### `list_deferred_namespaces(pod_id=None)`
 
-List deferred namespaces for a pod.
+List deferred namespaces for a pod or all pods.
+
+**Parameters:**
+- `pod_id`: Pod ID string (optional, lists all pods if None)
 
 #### `load_and_expose_namespace(pod_id, namespace_name)`
 
-Load a deferred namespace and expose it as a module.
-
-### Declarative Pod Configuration
-
-Python Pods supports declarative pod configuration through `pyproject.toml`, similar to how babashka uses `bb.edn`. This allows you to specify which pods your project uses in a configuration file, making it easy to manage dependencies and ensure consistent pod versions across environments.
-
-#### Configuration Format
-
-Add a `[tool.python-pods]` section to your `pyproject.toml`:
-
-```toml
-[tool.python-pods]
-pods = [
-    # Pod from registry with version
-    { name = "org.babashka/hsqldb", version = "0.1.0" },
-    
-    # Local pod with path
-    { name = "my.local/pod", path = "../pod-my-local/my-pod-binary", cache = false },
-    
-    # Pod with additional options
-    { name = "pod.example/advanced", version = "2.0.0", opts = { transport = "socket" } }
-]
-```
-
-#### Loading Pods from Configuration
-
-Use the `load_pods_from_pyproject()` function to load pods:
-
-```python
-import python_pods as pods
-
-# Load all pods declared in pyproject.toml
-all_pods = pods.load_pods_from_pyproject()
-
-# Load only specific pods
-selected_pods = pods.load_pods_from_pyproject("org.babashka/hsqldb", "my.local/pod")
-
-# Use a different configuration file
-custom_pods = pods.load_pods_from_pyproject(config_file="./config/pyproject.toml")
-
-# After loading, the pods are automatically available as modules
-import pod_babashka_hsqldb as hsqldb
-result = hsqldb.execute("SELECT * FROM users")
-```
-
-#### Configuration Options
-
-Each pod specification supports the following fields:
-
-- `name` (required): The pod identifier (e.g., "org.babashka/hsqldb")
-- `version` (optional): Version to download from the pod registry
-- `path` (optional): Path to a local pod executable
-- `cache` (optional): Whether to cache pod metadata (default: true)
-- `opts` (optional): Additional options passed to `load_pod()`
-
-**Note**: You must specify either `version` (for registry pods) or `path` (for local pods), but not both.
-
-#### Requirements
-
-- Python 3.11+ includes `tomllib` for reading TOML files
-- For Python < 3.11, install `tomli`: `pip install tomli`
-
-#### Example Project Setup
-
-1. Create a `pyproject.toml` with your pod dependencies:
-
-```toml
-[project]
-name = "my-data-project"
-version = "0.1.0"
-
-[tool.python-pods]
-pods = [
-    { name = "org.babashka/hsqldb", version = "0.1.0" },
-    { name = "org.babashka/postgresql", version = "0.5.0" }
-]
-```
-
-2. In your Python code:
-
-```python
-import python_pods as pods
-
-# Load all configured pods at startup
-pods.load_pods_from_pyproject()
-
-# Now use them anywhere in your project
-import pod_babashka_hsqldb as hsqldb
-import pod_babashka_postgresql as pg
-
-# Your database operations...
-```
-
-This approach ensures all team members and deployment environments use the same pod versions, similar to how `requirements.txt` or `poetry.lock` work for Python dependencies.
-
-### EDN Handler Registration
-
-These functions must be called within a pod context (after loading an EDN pod):
-
-#### `add_edn_read_handler(tag, handler_fn)`
-
-Register a custom EDN read handler for deserializing tagged values from pods.
+Load a deferred namespace and expose it as an importable module.
 
 **Parameters:**
-- `tag` (str): The EDN tag to handle (e.g., 'inst', 'uuid', 'myapp/person')
-- `handler_fn`: Function that takes the tagged value and returns Python object
+- `pod_id`: Pod ID string
+- `namespace_name`: Namespace name to load
+
+### Transit Handlers
+
+#### `add_transit_read_handler(pod_id, tag, handler_class)`
+
+Register a custom Transit read handler for a specific tag.
+
+**Parameters:**
+- `pod_id`: Pod ID string
+- `tag`: Transit tag string
+- `handler_class`: Class with static `from_rep` method
 
 **Example:**
 ```python
-def read_person(data):
-    return Person(data['name'], data['age'])
-
-pods.add_edn_read_handler('myapp/person', read_person)
-```
-
-#### `add_edn_write_handler(type_class, writer_fn)`
-
-Register a custom EDN write handler for serializing Python objects to pods.
-
-**Parameters:**
-- `type_class`: The Python class to handle
-- `writer_fn`: Function that takes the object and returns EDN-serializable data
-
-**Example:**
-```python
-def write_person(person):
-    return {'name': person.name, 'age': person.age}
-
-pods.add_edn_write_handler(Person, write_person)
-```
-
-### Socket Transport
-
-By default, pods communicate via standard input/output (stdio). You can also use socket transport for better performance and isolation:
-
-```python
-# Use socket transport instead of stdio
-pod = pods.load_pod(["clojure", "-M:some-pod"], {"transport": "socket"})
-
-# Everything else works the same way
-result = pod_namespace.some_function(args)
-```
-
-Socket transport is particularly useful for:
-- **Long-running pods** - Better resource isolation
-- **High-throughput scenarios** - Reduced overhead compared to stdio
-- **Concurrent pod usage** - Multiple pods can run independently
-
-The pod automatically creates a temporary port file and establishes the socket connection. No additional configuration is required.
-
-### Transit Handler Registration
-
-These functions must be called within a pod context (after loading a Transit+JSON pod):
-
-#### `add_transit_read_handler(tag, handler_class)`
-
-Register a custom Transit read handler for deserializing tagged values from pods.
-
-**Parameters:**
-- `tag` (str): The Transit tag to handle
-- `handler_class`: A class with a static `from_rep` method
-
-**Example:**
-```python
-class MyTypeReadHandler:
+class PersonReadHandler:
     @staticmethod
     def from_rep(rep):
-        return MyType(rep)
+        return Person(rep["name"], rep["age"])
 
-pods.add_transit_read_handler("my-type", MyTypeReadHandler)
+pods.add_transit_read_handler(pod_id, "person", PersonReadHandler)
 ```
 
-#### `add_transit_write_handler(classes, handler_class)`
+#### `add_transit_write_handler(pod_id, classes, handler_class)`
 
-Register a custom Transit write handler for serializing Python objects to pods.
+Register a custom Transit write handler for specific classes.
 
 **Parameters:**
-- `classes`: A class or list of classes to handle
-- `handler_class`: A class with static `tag` and `rep` methods
+- `pod_id`: Pod ID string
+- `classes`: Class or list of classes to handle
+- `handler_class`: Class with static `tag` and `rep` methods
 
 **Example:**
 ```python
-class MyTypeWriteHandler:
+class PersonWriteHandler:
     @staticmethod
     def tag(obj):
-        return "my-type"
+        return "person"
     
     @staticmethod
     def rep(obj):
-        return obj.serialize()
+        return {"name": obj.name, "age": obj.age}
 
-pods.add_transit_write_handler([MyType], MyTypeWriteHandler)
+pods.add_transit_write_handler(pod_id, [Person], PersonWriteHandler)
 ```
 
-#### `set_default_transit_write_handler(handler_class)`
+#### `set_default_transit_write_handler(pod_id, handler_class)`
 
 Set a default Transit write handler for unregistered types.
 
 **Parameters:**
-- `handler_class`: A class with static `tag` and `rep` methods
+- `pod_id`: Pod ID string
+- `handler_class`: Class with static `tag` and `rep` methods
+
+### Data Types
+
+#### `WithMeta(value, meta=None)`
+
+Container class for data with metadata, used with Transit+JSON format.
+
+**Parameters:**
+- `value`: The actual data value
+- `meta`: Metadata dictionary (optional)
+
+**Attributes:**
+- `value`: The wrapped data
+- `meta`: The metadata dictionary
 
 **Example:**
 ```python
-class DefaultWriteHandler:
-    @staticmethod
-    def tag(obj):
-        return type(obj).__name__
-    
-    @staticmethod
-    def rep(obj):
-        return str(obj)
+data = [1, 2, 3]
+metadata = {"source": "user", "timestamp": "2024-01-01"}
+wrapped = pods.WithMeta(data, metadata)
 
-pods.set_default_transit_write_handler(DefaultWriteHandler)
+# Send to pod function
+result = some_pod_function(wrapped)
+
+# Access result
+if hasattr(result, 'meta'):
+    print(f"Data: {result.value}")
+    print(f"Metadata: {result.meta}")
+```
+
+### Exceptions
+
+#### `PodError(message, data=None)`
+
+Exception raised when pod operations fail.
+
+**Attributes:**
+- `message`: Error message string
+- `data`: Additional error data (dict)
+
+**Example:**
+```python
+try:
+    result = pod_function("invalid_input")
+except pods.PodError as e:
+    print(f"Pod error: {e}")
+    print(f"Error data: {e.data}")
 ```
 
 ## Examples
@@ -663,44 +589,6 @@ import pod_echo as echo
 
 result = echo.echo_message("Hello, World!")
 print(result)
-```
-
-### Working with Registry Pods
-
-```python
-import python_pods as pods
-
-# Load the instaparse pod from the registry
-pod = pods.load_pod('org.babashka/instaparse', {'version': '0.0.6'})
-import pod_babashka_instaparse as insta
-
-# Create a grammar and parse some text
-parser = insta.parser("S = AB* AB = A B A = 'a'+ B = 'b'+")
-result = insta.parse(parser, "aaaaabbbaaaabb")
-
-# The result contains WithMeta objects and transit keywords
-# See test/test_instaparse.py for complete example of processing these results
-print("Raw result:", result)
-
-# Post-process to get clean Python data structures
-def unwrap_withmeta(node):
-    if hasattr(node, 'value'):
-        return unwrap_withmeta(node.value)
-    elif isinstance(node, list):
-        return [unwrap_withmeta(item) for item in node]
-    elif str(type(node)) == "<class 'transit.transit_types.Keyword'>":
-        keyword_str = str(node)
-        if ' ' in keyword_str:
-            name = keyword_str.split(' ')[1].rstrip(' >')
-            if '/' in name:
-                return name.split('/')[-1]
-            return name
-        return keyword_str
-    else:
-        return node
-
-clean_result = unwrap_withmeta(result)
-print("Cleaned result:", clean_result)
 ```
 
 ### Working with Complex Data
@@ -827,10 +715,6 @@ except PodError as e:
     print(f"Error data: {e.data}")
 ```
 
-## Threading
-
-The library is thread-safe and uses concurrent futures for managing pod communication. Each pod runs in its own process with a dedicated communication thread.
-
 ## Development and Testing
 
 The project includes a comprehensive test suite using a local test pod. To run tests:
@@ -858,6 +742,6 @@ This library implements the babashka pod protocol and is compatible with any pro
 
 ## License
 
-Copyright © 2024 Jude Payne
+Copyright © 2025 Jude Payne
 
 Distributed under the MIT License.

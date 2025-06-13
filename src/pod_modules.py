@@ -93,3 +93,75 @@ def unregister_pod_modules(pod_id):
     
     # Clean up loaded namespaces tracking
     loaded_namespaces.pop(pod_id, None)
+
+def load_and_expose_namespace(pod_id, namespace_name):
+    """Load a deferred namespace and expose it as a module"""
+    # Import inside function to avoid circular dependency
+    from python_pods import lookup_pod, load_ns
+    
+    pod = lookup_pod(pod_id)
+    if not pod:
+        raise ValueError(f"Pod {pod_id} not found")
+    
+    # Check if already loaded
+    if (pod_id in loaded_namespaces and 
+        namespace_name in loaded_namespaces[pod_id]):
+        print(f"✅ Namespace {namespace_name} already loaded")
+        return loaded_namespaces[pod_id][namespace_name]
+    
+    # Find the namespace in the pod's deferred namespaces
+    deferred_namespace = None
+    for namespace in pod["namespaces"]:
+        if namespace["name"] == namespace_name and namespace.get("defer", False):
+            deferred_namespace = namespace
+            break
+    
+    if not deferred_namespace:
+        raise ValueError(f"Deferred namespace {namespace_name} not found in pod {pod_id}")
+    
+    # Load the namespace from the pod
+    result = load_ns(pod, namespace_name)
+    
+    # If load_ns returns a namespace dict, use it; otherwise use the existing one
+    if isinstance(result, dict) and "name" in result:
+        # Update the namespace with loaded vars
+        deferred_namespace.update(result)
+    
+    # Now expose it as a module
+    module = expose_namespace_as_module(pod, deferred_namespace)
+    
+    print(f"🚀 Loaded and registered deferred namespace: {namespace_name}")
+    return deferred_namespace
+
+def list_deferred_namespaces(pod_id=None):
+    """List deferred namespaces for a pod or all pods"""
+    # Import inside function to avoid circular dependency
+    from python_pods import lookup_pod, pods
+    
+    if pod_id:
+        pod = lookup_pod(pod_id)
+        if not pod:
+            print(f"Pod {pod_id} not found")
+            return
+        pods_to_check = {pod_id: pod}
+    else:
+        pods_to_check = pods
+    
+    deferred_found = False
+    for pid, pod in pods_to_check.items():
+        pod_deferred = []
+        for namespace in pod["namespaces"]:
+            if namespace.get("defer", False):
+                is_loaded = (pid in loaded_namespaces and 
+                           namespace["name"] in loaded_namespaces[pid])
+                status = "loaded" if is_loaded else "not loaded"
+                pod_deferred.append(f"    {namespace['name']} ({status})")
+        
+        if pod_deferred:
+            deferred_found = True
+            print(f"Pod {pid} deferred namespaces:")
+            for ns_info in pod_deferred:
+                print(ns_info)
+    
+    if not deferred_found:
+        print("No deferred namespaces found")
