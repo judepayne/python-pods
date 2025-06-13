@@ -302,7 +302,7 @@
                                                    "clj" "(def result (+ 42 8))"}}
                                           
                                           "complex"
-                                          {"code" {"py" "import math\ndef calculate_area(radius):\n    return math.pi * radius * radius\narea = calculate_area(5)"
+                                          {"code" {"py" "import math\ndef calculate_area(radius):\n    return math.pi * radius * radius\nresult = calculate_area(5)"
                                                    "clj" "(defn calculate-area [radius] (* Math/PI radius radius))\n(def area (calculate-area 5))"}}
                                           
                                           ;; Default case - just python code

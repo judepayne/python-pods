@@ -126,10 +126,10 @@ expected_area = math.pi * 5 * 5
 # NEW: The functions should now be available in our namespace
 try:
     # Test that the function is now available globally
-    test_area = calculate_area(3)  # Should work now!
+    test_area = calculate_area(5)  # Should work now!
     
     # Check the returned value
-    assert abs(complex_result - expected_area) < 0.0001, f"Expected {expected_area}, got {complex_result}"
+    assert abs(test_area - expected_area) < 0.0001, f"Expected {expected_area}, got {test_area}"
     
 except NameError as e:
     print(f"❌ Function not available in global scope: {e}")
