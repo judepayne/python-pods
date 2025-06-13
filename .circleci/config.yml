@@ -1,0 +1,56 @@
+version: 2.1
+
+executors:
+  python-executor:
+    docker:
+      - image: cimg/python:3.11
+    working_directory: ~/project
+
+jobs:
+  test:
+    executor: python-executor
+    steps:
+      - checkout
+      
+      # Install Java for Clojure
+      - run:
+          name: Install Java
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y openjdk-11-jdk
+            echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64' >> $BASH_ENV
+            echo 'export PATH=$JAVA_HOME/bin:$PATH' >> $BASH_ENV
+      
+      # Install Clojure CLI
+      - run:
+          name: Install Clojure
+          command: |
+            curl -L -O https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh
+            chmod +x linux-install.sh
+            sudo ./linux-install.sh
+      
+      # Install uv
+      - run:
+          name: Install uv
+          command: |
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            source $HOME/.cargo/env
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+      
+      # Install Python dependencies and run tests
+      - run:
+          name: Install dependencies and run tests
+          command: |
+            uv sync
+            source .venv/bin/activate
+            for test_file in test/*.py; do
+              if [ -f "$test_file" ]; then
+                echo "Running: $test_file"
+                python "$test_file"
+              fi
+            done
+
+workflows:
+  test-workflow:
+    jobs:
+      - test
