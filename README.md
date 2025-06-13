@@ -4,6 +4,8 @@ A faithful port of the babashka pods library to python.
 
 ![](img/IMG_8734.jpeg)
 
+[![CircleCI](https://dl.circleci.com/status-badge/img/gh/judepayne/python-pods/tree/main.svg?style=svg)](https://dl.circleci.com/status-badge/redirect/gh/judepayne/python-pods/tree/main)
+
 python-pods allow interop with all pods that implement the pod protocol defined by [babashka pods](https://github.com/babashka/pods). You can load and run any pod from the [pod registry](https://github.com/babashka/pod-registry).
 
 python pods has a 'patch system' to override certain behaviour exposed by pods which expect the client to be clojure/ babashka. Details below.
