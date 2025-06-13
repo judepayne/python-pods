@@ -34,21 +34,15 @@ jobs:
           name: Install uv
           command: |
             curl -LsSf https://astral.sh/uv/install.sh | sh
-            source $HOME/.cargo/env
-            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> $BASH_ENV
       
       # Install Python dependencies and run tests
       - run:
           name: Install dependencies and run tests
           command: |
+            export PATH="$HOME/.local/bin:$PATH"
             uv sync
-            source .venv/bin/activate
-            for test_file in test/*.py; do
-              if [ -f "$test_file" ]; then
-                echo "Running: $test_file"
-                python "$test_file"
-              fi
-            done
+            ./run_tests.sh
 
 workflows:
   test-workflow:
