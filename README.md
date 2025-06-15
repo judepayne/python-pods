@@ -15,7 +15,7 @@ python pods has a 'patch system' to override certain behaviour exposed by pods w
 
 - Load and communicate with pods using EDN, JSON, or Transit+JSON formats
 - Automatic pod downloading from the babashka pod registry
-- Pod functionality patching system via pyproject.toml configuration
+- Patch existing pods to make more python friendly when necessary
 - Expose pod namespaces as importable Python modules
 - Support for custom EDN readers and Transit transforms
 - Metadata preservation with Transit+JSON format
@@ -35,6 +35,8 @@ uv add python-pods
 
 ## Quick Start
 
+The instaparse pod is clojure pod in the [babashka pod registry](https://github.com/babashka/pod-registry) for working with the wonderful [instaparse](https://github.com/Engelberg/instaparse) library. Let's use it in python! 
+
 ```python
 import python_pods as pods
 
@@ -50,7 +52,7 @@ result = insta.parse(parser, "aaaaabbbaaaabb")
 print(result)
 ```
 
-For a complete working example with result processing, see `test/test_instaparse.py` which demonstrates how to work with complex pod results including `WithMeta` objects and transit keywords. `WithMeta` is a simple python class that allows you to work with pods that expect or return metadata along with data.
+For a complete working example with result processing, see `test/test_instaparse.py` which demonstrates how to work with complex pod results including `WithMeta` objects and transit keywords. Clojure supports metadata on its collections and instaparse results are returned with metadata embeed in them. `WithMeta` is a simple python class that allows you to work with pods that expect or return metadata along with data.
 
 ### Cache Management
 
@@ -68,7 +70,7 @@ The resolver automatically handles platform detection and will fall back to comp
 
 ## Patch System
 
-Python Pods includes a runtime patching system that allows you to modify pod behavior at runtime without changing pod code. This enables you to transform pod results, override functions, or add custom data type handling.
+Python Pods includes a runtime patching system that allows you to modify pod behavior at runtime without changing pod code. This enables you to transform pod results, override functions, or add custom data type handling. Most pods naturally assume the pod client is [babashka pods](https://github.com/babashka/pods), so for some pods, patches make working with them from python more frictionless.
 
 ### Patch Types
 
@@ -104,6 +106,9 @@ def read_person(data):
 
 pods.register_edn_reader_patch(pod_id, 'person', read_person)
 ```
+
+Please see the test scripts in `test\` for actual code examples.
+
 
 ### Example Usage
 
@@ -717,6 +722,7 @@ except PodError as e:
 The project includes a comprehensive test suite using a local test pod. To run tests:
 
 ```bash
+# you've already git cloned this library
 # Install dependencies
 uv sync
 
