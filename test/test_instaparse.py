@@ -7,6 +7,14 @@ def unwrap_withmeta(node):
     if hasattr(node, 'value'):
         # Unwrap WithMeta and recurse
         return unwrap_withmeta(node.value)
+    elif isinstance(node, dict):
+        # Process dictionaries (like failure objects)
+        result = {}
+        for key, value in node.items():
+            clean_key = unwrap_withmeta(key)
+            clean_value = unwrap_withmeta(value)
+            result[clean_key] = clean_value
+        return result
     elif isinstance(node, list):
         # Process each item in the list
         return [unwrap_withmeta(item) for item in node]

@@ -41,7 +41,7 @@ class PatchRegistry:
             self.code_patches[pod_id] = {}
         
         self.code_patches[pod_id][function_name] = python_code
-        print(f"🔧 Registered code patch: {pod_id} -> {function_name}")
+        print(f"Registered code patch: {pod_id} -> {function_name}")
     
     def register_edn_reader_patch(self, pod_id: str, tag: str, reader_function: Callable):
         """Register an EDN reader patch for a specific pod and tag
@@ -61,7 +61,7 @@ class PatchRegistry:
             self.edn_reader_patches[pod_id] = {}
         
         self.edn_reader_patches[pod_id][tag] = reader_function
-        print(f"📖 Registered EDN reader patch: {pod_id} -> {tag}")
+        print(f"Registered EDN reader patch: {pod_id} -> {tag}")
     
     def register_result_transform_patch(self, pod_id: str, function_name: str, transform_function: Callable):
         """Register a result transform patch for a specific pod function
@@ -81,7 +81,7 @@ class PatchRegistry:
             self.result_transform_patches[pod_id] = {}
         
         self.result_transform_patches[pod_id][function_name] = transform_function
-        print(f"🔄 Registered result transform patch: {pod_id} -> {function_name}")
+        print(f"Registered result transform patch: {pod_id} -> {function_name}")
     
     def get_code_patch(self, pod_id: str, function_name: str) -> Optional[str]:
         """Get a code patch if it exists"""

@@ -157,7 +157,7 @@ Note pod_id is obtained from when you load a pod. e.g.
 
 ````python
 pod = pods.load_pod('org.babashka/instaparse', {'version': '0.0.6'})
-pod_id = pod['id']
+pod_id = pod['pod_id'] # 'org.babashka/instaparse'
 ````
 
 pod_id is used in several of the public api functions which are detailed below.

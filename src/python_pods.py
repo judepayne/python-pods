@@ -230,7 +230,6 @@ def invoke(pod, pod_var, args, opts=None):
         if transform_function:
             try:
                 result = transform_function(result)
-                print(f"🔄 Applied result transform for {pod_var}")
             except Exception as e:
                 warn(f"Result transform failed for {pod_var}: {e}")
                 # Keep original result on error
@@ -270,8 +269,6 @@ def invoke(pod, pod_var, args, opts=None):
                     else:
                         # Return all non-private variables
                         result = {k: v for k, v in exec_locals.items() if not k.startswith('_')}
-                    
-                    print(f"🔧 Applied code patch for {pod_var}")
                     
                     if isinstance(result, Exception):
                         raise result

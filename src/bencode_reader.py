@@ -188,7 +188,7 @@ def test_reader():
         read_time_ms = (end_time - start_time) * 1000
         
         if result:
-            print("✅ Successfully read and decoded message!")
+            print("Successfully read and decoded message!")
             print(f"Read time: {read_time_ms:.3f} ms")
             print(f"Decoded result type: {type(result)}")
             print(f"Keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
@@ -230,15 +230,15 @@ def test_reader():
             print(f"Remaining bytes: {len(remaining)} (should be 0)")
             
             if raw_result == test_bytes:
-                print("🎉 Perfect match! The parser works correctly.")
+                print("Perfect match! The parser works correctly.")
             else:
-                print("⚠️  Raw buffer doesn't match input")
+                print("⚠Raw buffer doesn't match input")
                 print(f"Expected: {test_bytes.hex()}")
                 print(f"Got:      {raw_result.hex()}")
         else:
-            print("❌ Failed to read message (returned None)")
+            print("Failed to read message (returned None)")
             
     except Exception as e:
-        print(f"❌ Error during parsing: {e}")
+        print(f"Error during parsing: {e}")
         import traceback
         traceback.print_exc()
