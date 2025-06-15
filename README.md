@@ -28,14 +28,9 @@ python pods has a 'patch system' to override certain behaviour exposed by pods w
 This project uses [uv](https://astral.sh/uv) as the Python package manager for fast and reliable dependency management.
 
 ```bash
-# Install from Pypi
+pip install python-pods
+# or
 uv add python-pods
-# Install dependencies and activate environment
-uv sync
-source .venv/bin/activate
-
-# Run tests
-./run_test.sh
 ```
 
 ## Quick Start
